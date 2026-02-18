@@ -1,9 +1,12 @@
 // =============================================================================
 // statistics.hpp — Population genetics summary statistics.
 //
-// Provides a Statistics utility with functions that work on any storage
-// backend.  All functions are free-standing templates so they work with both
-// DenseHaplotypes and SparseVariants without modification.
+// Provides summary statistics that work on any storage backend.
+//
+// Original backend-specific functions (compute_sfs_dense, compute_sfs_sparse,
+// etc.) are retained for backward compatibility.  New concept-constrained
+// template functions (compute_sfs, compute_pi, compute_summary, etc.) auto-
+// dispatch to the best implementation for any conforming storage type.
 //
 // Implemented statistics:
 //   - Site Frequency Spectrum (SFS), folded and unfolded
@@ -16,6 +19,7 @@
 // =============================================================================
 #pragma once
 
+#include "concepts.hpp"
 #include "dense_haplotypes.hpp"
 #include "sparse_variants.hpp"
 #include "types.hpp"
@@ -317,6 +321,116 @@ inline void print_sfs(const std::vector<std::size_t>& sfs, std::size_t max_k = 2
     std::size_t tail = 0;
     for (std::size_t k = limit; k < sfs.size() - 1; ++k) tail += sfs[k];
     if (tail > 0) std::cout << "    SFS[" << limit << "..]=(" << tail << " sites)\n";
+}
+
+// =============================================================================
+// Generic concept-constrained overloads
+// =============================================================================
+// These dispatch to the optimal backend-specific implementation when available
+// and fall back to element-by-element access for custom storage backends.
+
+/// Generic SFS — uses element access for any conforming backend.
+template <typename Storage>
+requires ElementAccessStorage<Storage>
+[[nodiscard]] std::vector<std::size_t>
+compute_sfs(const Storage& storage) {
+    if constexpr (std::same_as<Storage, DenseHaplotypes>) {
+        return compute_sfs_dense(storage);
+    } else if constexpr (std::same_as<Storage, SparseVariants>) {
+        return compute_sfs_sparse(storage);
+    } else {
+        // Generic fallback via element access.
+        const std::size_t H = storage.num_haplotypes();
+        const std::size_t L = storage.num_sites();
+        std::vector<std::size_t> sfs(H + 1, 0);
+        for (std::size_t s = 0; s < L; ++s) {
+            std::size_t non_ref = 0;
+            for (std::size_t h = 0; h < H; ++h) {
+                if (storage.get(h, static_cast<SiteIndex>(s)) != kRefAllele)
+                    ++non_ref;
+            }
+            ++sfs[non_ref];
+        }
+        return sfs;
+    }
+}
+
+/// Generic nucleotide diversity.
+template <typename Storage>
+requires ElementAccessStorage<Storage>
+[[nodiscard]] double compute_pi(const Storage& storage) {
+    return compute_pi_from_sfs(compute_sfs(storage));
+}
+
+/// Generic site heterozygosity.
+template <typename Storage>
+requires ElementAccessStorage<Storage>
+[[nodiscard]] double site_heterozygosity(const Storage& storage, SiteIndex site) {
+    if constexpr (std::same_as<Storage, DenseHaplotypes>) {
+        return site_heterozygosity_dense(storage, site);
+    } else if constexpr (std::same_as<Storage, SparseVariants>) {
+        return site_heterozygosity_sparse(storage, site);
+    } else {
+        // Generic: count alleles via element access.
+        const std::size_t H = storage.num_haplotypes();
+        std::vector<std::pair<AlleleID, std::size_t>> counts;
+        for (std::size_t h = 0; h < H; ++h) {
+            AlleleID a = storage.get(h, site);
+            auto it = std::find_if(counts.begin(), counts.end(),
+                                   [a](auto& p){ return p.first == a; });
+            if (it != counts.end()) ++it->second;
+            else counts.emplace_back(a, 1);
+        }
+        double n = static_cast<double>(H);
+        double sum_p2 = 0.0;
+        for (auto& [a, c] : counts) {
+            double p = static_cast<double>(c) / n;
+            sum_p2 += p * p;
+        }
+        return 1.0 - sum_p2;
+    }
+}
+
+/// Generic mean heterozygosity.
+template <typename Storage>
+requires ElementAccessStorage<Storage>
+[[nodiscard]] double mean_heterozygosity(const Storage& storage) {
+    if constexpr (std::same_as<Storage, DenseHaplotypes>) {
+        return mean_heterozygosity_dense(storage);
+    } else if constexpr (std::same_as<Storage, SparseVariants>) {
+        return mean_heterozygosity_sparse(storage);
+    } else {
+        const std::size_t L = storage.num_sites();
+        if (L == 0) return 0.0;
+        double sum = 0.0;
+        for (std::size_t s = 0; s < L; ++s) {
+            sum += site_heterozygosity(storage, static_cast<SiteIndex>(s));
+        }
+        return sum / static_cast<double>(L);
+    }
+}
+
+/// Generic summary statistics.
+template <typename Storage>
+requires ElementAccessStorage<Storage>
+[[nodiscard]] SummaryStats compute_summary(const Storage& storage) {
+    if constexpr (std::same_as<Storage, DenseHaplotypes>) {
+        return compute_summary_dense(storage);
+    } else if constexpr (std::same_as<Storage, SparseVariants>) {
+        return compute_summary_sparse(storage);
+    } else {
+        SummaryStats ss;
+        ss.num_haplotypes = storage.num_haplotypes();
+        ss.num_sites      = storage.num_sites();
+        ss.sfs            = compute_sfs(storage);
+        ss.segregating_sites = segregating_sites_from_sfs(ss.sfs);
+        ss.pi             = compute_pi_from_sfs(ss.sfs);
+        ss.theta_w        = compute_theta_w(ss.segregating_sites, ss.num_haplotypes);
+        ss.tajimas_d      = compute_tajimas_d(ss.pi, ss.theta_w,
+                                               ss.segregating_sites, ss.num_haplotypes);
+        ss.mean_heterozygosity = mean_heterozygosity(storage);
+        return ss;
+    }
 }
 
 }  // namespace gensim

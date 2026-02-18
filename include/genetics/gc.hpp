@@ -17,10 +17,14 @@
 // iterate the variant list and remove entries that are all-ref or all-same.
 //
 // Call gc_sweep() periodically (e.g., every 10–50 generations).
+//
+// A concept-constrained generic gc_sweep() is also provided that works
+// with any ElementAccessStorage backend.
 // =============================================================================
 #pragma once
 
 #include "allele_table.hpp"
+#include "concepts.hpp"
 #include "dense_haplotypes.hpp"
 #include "sparse_variants.hpp"
 #include "types.hpp"
@@ -141,6 +145,63 @@ inline GCResult gc_sweep_sparse(SparseVariants& storage,
     }
 
     return result;
+}
+
+// =============================================================================
+// Generic GC sweep — works with any ElementAccessStorage backend.
+// =============================================================================
+// Falls through to the optimised Dense/Sparse versions when applicable.
+// For custom backends, scans every site via element access.
+
+template <typename Storage>
+requires ElementAccessStorage<Storage>
+[[nodiscard]] GCResult gc_sweep(Storage& storage,
+                                 const AlleleTable& table,
+                                 Generation current_gen)
+{
+    if constexpr (std::same_as<Storage, DenseHaplotypes>) {
+        return gc_sweep_dense(storage, table, current_gen);
+    } else if constexpr (std::same_as<Storage, SparseVariants>) {
+        return gc_sweep_sparse(storage, table, current_gen);
+    } else {
+        // Generic element-access fallback.
+        GCResult result;
+        const std::size_t H = storage.num_haplotypes();
+        const std::size_t L = storage.num_sites();
+
+        for (std::size_t s = 0; s < L; ++s) {
+            SiteIndex site = static_cast<SiteIndex>(s);
+            AlleleID first = storage.get(0, site);
+
+            // Check: is this site monomorphic?
+            bool all_same = true;
+            bool all_ref  = (first == kRefAllele);
+
+            for (std::size_t h = 1; h < H; ++h) {
+                AlleleID a = storage.get(h, site);
+                if (a != first) { all_same = false; break; }
+            }
+
+            if (all_same && !all_ref) {
+                // Fixed non-ref allele.
+                result.substitutions.push_back(
+                    Substitution{first, site, current_gen});
+                result.fitness_offset += table[first].sel_coeff;
+                ++result.fixed_count;
+
+                // Requires mutable hap_ptr or element-set on the front buffer.
+                // For generic backends we can't reset easily without a set().
+                // This is a limitation of the generic path; backends that want
+                // GC should provide a mutable front-buffer accessor.
+                if constexpr (PointerAccessStorage<Storage>) {
+                    for (std::size_t h = 0; h < H; ++h) {
+                        storage.hap_ptr(h)[site] = kRefAllele;
+                    }
+                }
+            }
+        }
+        return result;
+    }
 }
 
 }  // namespace gensim

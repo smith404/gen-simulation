@@ -64,6 +64,29 @@ public:
         return back_.data() + hap * l_;
     }
 
+    // ── Element-access API (satisfies ElementAccessStorage concept) ────────
+    // These wrappers provide uniform per-element access so that generic
+    // algorithms written against ElementAccessStorage compile for Dense
+    // without sacrificing the ability to use raw pointers when needed.
+
+    /// Read allele for haplotype `hap` at site `pos` in the FRONT buffer.
+    [[nodiscard]] AlleleID get(std::size_t hap, SiteIndex pos) const noexcept {
+        assert(hap < 2 * n_ && pos < l_);
+        return front_[hap * l_ + pos];
+    }
+
+    /// Read allele for haplotype `hap` at site `pos` in the BACK buffer.
+    [[nodiscard]] AlleleID offspring_get(std::size_t hap, SiteIndex pos) const noexcept {
+        assert(hap < 2 * n_ && pos < l_);
+        return back_[hap * l_ + pos];
+    }
+
+    /// Write allele for haplotype `hap` at site `pos` in the BACK buffer.
+    void offspring_set(std::size_t hap, SiteIndex pos, AlleleID allele) noexcept {
+        assert(hap < 2 * n_ && pos < l_);
+        back_[hap * l_ + pos] = allele;
+    }
+
     // ── Block copy helpers (used by recombination) ──────────────────────────
 
     /// Copy a contiguous segment [site_begin, site_end) from a parent haplotype

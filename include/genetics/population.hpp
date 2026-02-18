@@ -14,9 +14,8 @@
 //   • the global AlleleTable (shared across the simulation),
 //   • a fitness cache (recomputed each generation before selection).
 //
-// Individual metadata is intentionally thin — we store only an index into the
-// storage.  Users who need richer metadata (sex, age, spatial location) can
-// extend Individual or keep a parallel vector.
+// Individual is defined in types.hpp so that other headers (mating systems,
+// trait models, output formats) can use it without circular includes.
 // =============================================================================
 #pragma once
 
@@ -29,12 +28,6 @@
 #include <vector>
 
 namespace gensim {
-
-// ── Thin per-individual metadata ────────────────────────────────────────────
-struct Individual {
-    std::size_t index = 0;   // index into the storage (haplotypes 2*i, 2*i+1)
-    // Extend here: sex, age, location, pedigree pointers, etc.
-};
 
 // ── Population ──────────────────────────────────────────────────────────────
 template <typename Storage,
@@ -67,6 +60,9 @@ public:
     [[nodiscard]] const AlleleTable&   alleles()  const noexcept { return allele_table_; }
     [[nodiscard]]       AlleleTable&   alleles()        noexcept { return allele_table_; }
     [[nodiscard]] const std::vector<Fitness>& fitness() const noexcept { return fitness_cache_; }
+
+    [[nodiscard]] const std::vector<Individual>& individuals() const noexcept { return individuals_; }
+    [[nodiscard]]       std::vector<Individual>& individuals()       noexcept { return individuals_; }
 
     // ── Policy access (for inspection / hot-swap) ───────────────────────────
     [[nodiscard]] const MutationPolicy& mutation_policy() const noexcept { return mut_policy_; }
@@ -133,6 +129,33 @@ public:
 
     [[nodiscard]] std::size_t segregating_sites() const {
         return storage_.count_segregating_sites();
+    }
+
+    // ── Quantitative trait computation ──────────────────────────────────────
+    /// Evaluate a TraitModel for all individuals, storing results in
+    /// Individual::traits.  TraitModel must provide:
+    ///   void operator()(const Storage&, const AlleleTable&,
+    ///                   Individual&, std::mt19937_64&) const;
+    template <typename TraitModel>
+    void compute_traits(const TraitModel& model, std::mt19937_64& rng) {
+        for (auto& ind : individuals_) {
+            model(storage_, allele_table_, ind, rng);
+        }
+    }
+
+    // ── Sex assignment helper ───────────────────────────────────────────────
+    /// Assign sex to all individuals.  If `proportion_male` is in [0,1],
+    /// each individual is randomly assigned Male/Female with that bias.
+    /// If negative, all are set to Hermaphrodite.
+    void assign_sex(double proportion_male, std::mt19937_64& rng) {
+        if (proportion_male < 0.0) {
+            for (auto& ind : individuals_) ind.sex = Sex::Hermaphrodite;
+        } else {
+            std::bernoulli_distribution coin(proportion_male);
+            for (auto& ind : individuals_) {
+                ind.sex = coin(rng) ? Sex::Male : Sex::Female;
+            }
+        }
     }
 
 private:
